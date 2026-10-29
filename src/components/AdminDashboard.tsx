@@ -47,6 +47,7 @@ interface Reservation {
 const AdminDashboard = () => {
   const [open, setOpen] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [templates, setTemplates] = useState<ClassTemplate[]>([]);
   const [expandedClassId, setExpandedClassId] = useState<string | null>(null);
@@ -79,16 +80,13 @@ const AdminDashboard = () => {
   const [savingManual, setSavingManual] = useState(false);
   const [manualForm, setManualForm] = useState({ name: "", email: "", phone: "", classId: "", classDate: "", transactionCode: "" });
 
-  // Password is held only in memory after login and sent as a header on each
-  // admin call. The backend (edge function) validates it against the
-  // ADMIN_PASSWORD secret — there's no longer any hash in the bundle.
-  const [adminPwd, setAdminPwd] = useState<string>("");
+  // Login via Supabase Auth: o supabase-js envia o JWT da sessão em cada
+  // invoke, e as edge functions exigem app_metadata.role === "admin".
 
   const fetchUsersByIds = async (ids: string[]) => {
     if (ids.length === 0) return [] as { id: string; name: string; email: string; phone: string | null }[];
     const { data } = await supabase.functions.invoke("admin-users", {
       body: { ids },
-      headers: { "x-admin-password": adminPwd },
     });
     return (data?.users || []) as { id: string; name: string; email: string; phone: string | null }[];
   };
@@ -96,7 +94,6 @@ const AdminDashboard = () => {
   const fetchUserByEmail = async (email: string) => {
     const { data } = await supabase.functions.invoke("admin-users", {
       body: { email },
-      headers: { "x-admin-password": adminPwd },
     });
     const users = (data?.users || []) as { id: string; name: string; email: string; phone: string | null }[];
     return users[0] || null;
@@ -105,7 +102,6 @@ const AdminDashboard = () => {
   const adminCall = async <T = unknown>(action: string, payload: Record<string, unknown> = {}) => {
     const { data, error } = await supabase.functions.invoke("admin", {
       body: { action, payload },
-      headers: { "x-admin-password": adminPwd },
     });
     if (error) throw error;
     if (data?.error) throw new Error(data.error);
@@ -114,25 +110,24 @@ const AdminDashboard = () => {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!password) return;
-    // Verify password by issuing a no-op admin call. The edge function returns
-    // 401 (which surfaces as a function error) when the password is wrong.
-    try {
-      const { data, error } = await supabase.functions.invoke("admin", {
-        body: { action: "list_reservations", payload: { status: "confirmed", limit: 1 } },
-        headers: { "x-admin-password": password },
-      });
-      if (error || data?.error) {
-        toast.error("Senha incorreta");
-        return;
-      }
-      setAdminPwd(password);
-      setAuthenticated(true);
-      setPassword("");
-      fetchData();
-    } catch {
-      toast.error("Senha incorreta");
+    if (!email || !password) return;
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    if (error) {
+      toast.error("E-mail ou senha incorretos");
+      return;
     }
+    // Confirma que o usuário é admin com uma chamada sem efeito colateral.
+    const { data, error: fnError } = await supabase.functions.invoke("admin", {
+      body: { action: "list_reservations", payload: { status: "confirmed", limit: 1 } },
+    });
+    if (fnError || data?.error) {
+      await supabase.auth.signOut();
+      toast.error("Este usuário não tem permissão de administrador");
+      return;
+    }
+    setAuthenticated(true);
+    setPassword("");
+    fetchData();
   };
 
   const fetchData = async () => {
@@ -564,7 +559,7 @@ const AdminDashboard = () => {
     setOpen(false);
     setAuthenticated(false);
     setPassword("");
-    setAdminPwd("");
+    supabase.auth.signOut();
     setSearchTerm("");
   };
 
@@ -660,8 +655,12 @@ const AdminDashboard = () => {
           {!authenticated ? (
             <form onSubmit={handleLogin} className="space-y-4 py-4">
               <div>
-                <Label htmlFor="admin-pass">Senha de administrador</Label>
-                <Input id="admin-pass" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Digite a senha" className="bg-secondary border-border mt-1" autoFocus />
+                <Label htmlFor="admin-email">E-mail</Label>
+                <Input id="admin-email" type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="seu@email.com" className="bg-secondary border-border mt-1" autoFocus />
+              </div>
+              <div>
+                <Label htmlFor="admin-pass">Senha</Label>
+                <Input id="admin-pass" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Digite a senha" className="bg-secondary border-border mt-1" />
               </div>
               <Button type="submit" className="w-full bg-gradient-primary text-primary-foreground font-bold rounded-full">Entrar</Button>
             </form>
